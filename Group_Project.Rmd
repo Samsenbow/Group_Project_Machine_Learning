@@ -1,0 +1,568 @@
+---
+title: "ML_Group_Project"
+output: pdf_document
+date: "2024-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, results='hide', include=FALSE}
+library(boot)
+library(rpart)
+library(rpart.plot) # for plotting decision trees
+library(tidyverse)
+library(caret)
+library(xgboost)
+library(glmnet)
+library(randomForest)
+library(pls)
+library(e1071)
+library(caret)
+
+```
+
+```{r, echo=FALSE}
+test_data = read.csv("test.csv")
+train_data = read.csv("train.csv")
+```
+
+# Data Exploration
+
+ADD SAMARA'S part
+
+```{r}
+#cor(df_train[,-c(1,10)])
+```
+
+
+It is worth to note that "decane_toluene" is not in the test data set
+
+
+# Missing Data
+
+Missing data was found in the 'parentspecies' attribute. According to the definition of the 'parentspecies' attribute, missing values imply a meaning.They are not missing randomly but due to difficulty in retrieving the 'parentspecies'. Therefore, a new level was created as 'Unknown'. 
+
+```{r}
+
+test_data$parentspecies[test_data$parentspecies == ""] <- "Unknown"
+train_data$parentspecies[train_data$parentspecies == ""] <- "Unknown"
+
+```
+
+
+```{r, echo=FALSE}
+train_data$parentspecies = factor(train_data$parentspecies)
+train_levels <- levels(train_data$parentspecies)  # Get levels from train data
+# Apply those levels to the test data
+test_data$parentspecies <- factor(test_data$parentspecies, levels = train_levels)
+```
+
+
+
+
+# Dummy model
+
+
+A dummy model is a supervised learning model that gives the same constant output regardless of the values of the covariates.
+We first built a dummy model and calculated the training error and the cross validation error.
+
+
+
+```{r}
+set.seed(123)
+dummy_model = glm(log_pSat_Pa ~ 1, data = train_data[,-1])
+dummy_cv_error_5 = cv.glm(train_data[,-1] , dummy_model , K = 10)$delta[1]
+dummy_error_train = mean((train_data$log_pSat_Pa - predict(dummy_model, train_data[,-1]))^2)
+```
+
+```{r, echo=FALSE}
+error_df = data.frame(model = "Dummy", train = dummy_error_train, cv = dummy_cv_error_5, kaggle_score = -0.0001)
+knitr::kable(error_df)
+```
+
+# OLS as a baseline model: kaggle_score = 0.7163
+
+ten fold cross validation was done to get the cross validation error
+
+```{r, warning=FALSE}
+set.seed(123)
+ols_fit = glm(log_pSat_Pa ~ ., data = train_data[,-1])
+cv_error_10 = cv.glm(train_data[,-1] , ols_fit , K = 10)$delta[1]
+error_train = mean((train_data$log_pSat_Pa - predict(ols_fit, train_data[,-1]))^2)
+
+```
+
+# Plotting
+
+```{r, echo=FALSE}
+#summary(ols_fit)
+par(mfrow=c(2,2))
+plot(ols_fit)
+
+hist(ols_fit$residuals)
+```
+
+
+```{r, echo=FALSE}
+new_row <- data.frame(model = "ols", train = error_train, cv = cv_error_10, kaggle_score = 0.7163)
+error_df <- rbind(error_df, new_row)
+knitr::kable(error_df)
+```
+
+
+
+```{r, echo=FALSE, eval=FALSE}
+y_hat = predict(ols_fit,newdata = test_data[,-1])
+
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+```
+
+
+## Then we analyze the correlation between each column and the target, selecting columns with a correlation above 0.5 or 0.3, and then using these for the model prediction. However, even after trying these two methods, the prediction score didn’t change,
+
+# Lasso 0.7160
+
+Before moving to non-linear models we tried regularization using Lasso
+
+"decane_toluene" is not in the test data set. so it was handled in a way so that both train and test dataset has the same number of levels
+
+```{r, echo=FALSE}
+a1 = table(train_data$parentspecies)
+a2 = table(test_data$parentspecies)
+
+df = data.frame(a1,a2)
+df2 = df[,-3]
+colnames(df2) <- c("Level", "Freq_train", "Freq_test")
+
+knitr::kable(df2)
+```
+
+
+```{r, echo=FALSE}
+
+
+y <- train_data$log_pSat_Pa
+
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2)])
+
+
+#x_train <- model.matrix(log_pSat_Pa ~ . - 1, data = train_data[,-1])
+
+lasso_model <- glmnet(x_train, y, family = "gaussian", alpha = 1)
+
+error_train_lasso = mean((train_data$log_pSat_Pa - predict(lasso_model, x_train))^2)
+
+```
+
+Cross validation to obtain the best lambda(tuning parameter)
+
+```{r, echo=FALSE}
+set.seed(123)
+cvfit = cv.glmnet(x_train, y, family = "gaussian", type.measure = "mse")
+
+
+best_lambda = cvfit$lambda.min
+#best_lambda
+
+```
+
+best lambda obtained was 0.002651092
+
+Plot
+```{r}
+plot(cvfit)
+```
+
+WE can use lasso as a variable selection method
+
+```{r, echo=FALSE}
+lasso_coefficients = coef(cvfit, s = "lambda.min")
+non_zero_coeffs = lasso_coefficients[lasso_coefficients != 0]
+c = predict(lasso_model,type = "coefficients", s = best_lambda)[1:26,]
+knitr::kable(c)
+```
+
+
+
+```{r, echo=FALSE}
+error_cv_lasso = mean((train_data$log_pSat_Pa - predict(cvfit, x_train, s = best_lambda))^2)
+
+new_row2 <- data.frame(model = "Lasso", train = error_train_lasso, cv = error_cv_lasso, kaggle_score = 0.7160)
+error_df <- rbind(error_df, new_row2)
+
+knitr::kable(error_df)
+
+```
+
+```{r, echo=FALSE}
+x_test <- model.matrix(~ . - 1, data = test_data[,-1])
+y_pred_test = predict(cvfit, newx = x_test, s = best_lambda)
+```
+
+
+
+```{r, echo=FALSE}
+ID = test_data$ID
+TARGET = as.vector(y_pred_test)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+```
+
+# PCR: Kaggel Score: 0.7163
+
+```{r}
+set.seed(9)
+pcr_fit = pcr(log_pSat_Pa ~ ., data = train_data[,-1], scale = TRUE, validation = "CV")
+```
+
+```{r}
+#summary(pcr_fit)
+
+validationplot(pcr_fit)
+```
+
+```{r}
+min.pcr = which.min(MSEP(pcr_fit)$val[1,1, ] ) - 1
+min.pcr
+```
+
+```{r}
+summary(pcr_fit)
+
+```
+
+
+predicting using 28 PCs (Lowest cross validation error occurs when using 28 PCs)
+
+```{r}
+pcr_fit_28PCs = pcr(log_pSat_Pa ~ ., data = train_data[,-1], scale = TRUE, ncomp = 28)
+
+```
+
+```{r, echo=FALSE, eval=FALSE}
+
+
+y_hat = predict(pcr_fit_28PCs, newdata = test_data[,-1], scale = TRUE)
+y_hat_last_component = y_hat[ , , 28]
+
+ID = test_data$ID
+TARGET = as.vector(y_hat_last_component)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+
+
+```
+
+
+# Regression tree
+
+```{r}
+set.seed(123)
+rt_model = rpart(log_pSat_Pa ~., data = train_data[,-1])
+
+```
+
+```{r}
+printcp(rt_model)
+
+```
+
+```{r}
+
+
+error_train_rt = mean((train_data$log_pSat_Pa - predict(rt_model, train_data[,-1]))^2)
+error_train_rt
+```
+High testing error
+
+Tree pruning check . I think this is wrong
+cp = 0.01
+
+```{r}
+Pruned_rt = prune(rt_model, cp = 0.01)
+
+error_val_rt = mean((train_data$log_pSat_Pa - predict(Pruned_rt, train_data[,-1]))^2)
+error_val_rt
+```
+
+
+
+# Boosting 
+
+# gradient Boosting by coco : Kaggle Score:0.7485
+
+
+
+```{r, warning=FALSE, results='hide'}
+y_train <- train_data$log_pSat_Pa  
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2)])
+
+
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+#dtest <- xgb.DMatrix(data = as.matrix(X_test))
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100, 
+  watchlist = list(train = dtrain),
+  verbose = 1
+)
+
+
+```
+
+
+```{r}
+save(xgb_model, file = "xgb_model.RData")
+
+```
+
+
+```{r, echo=FALSE, eval = FALSE}
+x_test <- model.matrix(~ . - 1, data = test_data[,-1])
+y_hat = predict(xgb_model,newdata = x_test)
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+
+
+```
+
+I cannot run this 
+
+```{r, eval = FALSE}
+grid <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6, 9),
+  eta = c(0.01, 0.1, 0.2),
+  gamma = c(0, 1, 5),
+  colsample_bytree = c(0.7, 0.8, 1),
+  min_child_weight = c(1, 3, 5),
+  subsample = c(0.7, 0.8, 1) 
+)
+
+control <- trainControl(
+  method = "cv",
+  number = 5, 
+  verboseIter = TRUE
+)
+
+xgb_tuned <- train(
+  x = x_train, y = y_train,
+  method = "xgbTree",
+  trControl = control,
+  tuneGrid = grid
+)
+
+print(xgb_tuned$bestTune)
+
+
+
+```
+
+```{r, eval = FALSE}
+
+x_test <- model.matrix(~ . - 1, data = test_data[,-1])
+y_hat = predict(xgb_tuned, newdata = x_test)
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+
+
+
+```
+
+
+# Random forest (Kaggle score: 0.7440)
+
+Default mtry is P/3, Here  p = 24
+
+Have to try with P = 8
+
+Kaggle score: 0.7440
+
+
+```{r, eval = FALSE}
+
+set.seed(123)
+
+bag.rf = randomForest(log_pSat_Pa ~ ., data = train_data[,-1], mtry = 5, importance = TRUE)
+
+```
+
+```{r, eval = FALSE}
+yhat.bag = predict(bag.rf , newdata = test_data[,-1])
+```
+
+```{r, eval = FALSE, echo=FALSE}
+#ID = test_data$ID
+#TARGET = yhat.bag
+#df = data.frame(ID, TARGET)
+#write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+```
+
+
+```{r, eval=FALSE}
+importance(bag.rf)
+```
+
+
+```{r, echo=FALSE}
+knitr::include_graphics("RF.jpg")
+```
+
+
+# SVR Selected features from lasso : Kaggle score: 0.5195
+
+Selected features from lasso is used : Removed "NumOfAtoms" ,  "NumOfN","C.C.C.O.in.non.aromatic.ring","hydroxyl..alkyl." , "nitrate"
+
+```{r, eval=FALSE}
+
+
+y_train <- train_data$log_pSat_Pa 
+
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2,4,7,13,14,20)])
+
+svm_model <- svm(
+  x = x_train, y = y_train,
+  type = "eps-regression",
+  kernel = "radial",
+  cost = 1,
+  gamma = 1 / ncol(x_train)
+)
+
+```
+
+
+
+```{r, eval=FALSE}
+
+x_test <- model.matrix(~ . - 1, data = test_data[,-c(1,2,6,12,13,19)])
+y_hat = predict(svm_model,newdata = x_test)
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+```
+
+Kaggle score: 0.5195
+
+# SVR using all the features: Kaggle score: 0.7554
+
+```{r, eval=FALSE}
+
+y_train <- train_data$log_pSat_Pa 
+
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2)])
+
+svm_model <- svm(
+  x = x_train, y = y_train,
+  type = "eps-regression",
+  kernel = "radial",
+  cost = 1,
+  gamma = 1 / ncol(x_train)
+)
+
+save(svm_model, file = "svm_model.RData")
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+x_test <- model.matrix(~ . - 1, data = test_data[,-1])
+y_hat = predict(svm_model,newdata = x_test)
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+
+```
+
+Kaggle score: 0.7554
+
+Why "eps-regression" ??
+
+# SVR Without "eps-regression" same Kaggle score: 0.7554
+
+```{r, eval=FALSE}
+y_train <- train_data$log_pSat_Pa 
+
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2)])
+
+svm_model_test <- svm(
+  x = x_train, y = y_train,
+  kernel = "radial",
+  cost = 1,
+  gamma = 1 / ncol(x_train)
+)
+
+save(svm_model_test, file = "svm_model_test.RData")
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+x_test <- model.matrix(~ . - 1, data = test_data[,-1])
+y_hat = predict(svm_model_test,newdata = x_test)
+ID = test_data$ID
+TARGET = as.vector(y_hat)
+df = data.frame(ID, TARGET)
+write.csv(df[, c("ID", "TARGET")], "dummy_submission.csv", row.names = FALSE)
+
+```
+
+
+# check 
+In the R e1071 package, if gamma is not specified explicitly when using an RBF kernel, it is often set to 1 / ncol(x_train). This value is commonly used as a heuristic to start with, providing a reasonable balance between overfitting and underfitting.
+
+#SVM Tuning : Run later 
+
+```{r, eval=FALSE}
+scaled_test_data = scale(test_data[,-c(1,10)])
+
+test_data[,-c(1,10)] <- scale(test_data[,-c(1,10)])
+```
+
+
+```{r, eval=FALSE}
+y_train <- train_data$log_pSat_Pa 
+
+x_train <- model.matrix(~ . - 1, data = train_data[,-c(1,2)])
+
+tune_grid <- expand.grid(
+  sigma = c(0.001, 0.01, 0.1),
+  C = c(0.1, 1, 10)
+)
+
+control <- trainControl(method = "cv", number = 5)
+
+svm_tuned <- train(
+  x = x_train, y = y_train,
+  method = "svmRadial",       
+  tuneGrid = tune_grid,
+  trControl = control
+  #preProcess = c("center", "scale")
+)
+
+#print(svm_tuned$bestTune)
+save(model, file = "svm_tuned")
+```
+
+
+Next step : Perform PCA for varible selection and then running SVM
